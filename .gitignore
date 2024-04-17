@@ -1,2 +1,2 @@
-server/Cargo.lock
 server/target/
+server/data.sqlite

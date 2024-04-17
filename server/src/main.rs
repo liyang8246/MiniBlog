@@ -1,45 +1,37 @@
-use anyhow::Ok;
-use article::{delete, edit, get, new, view::{self}};
-use ntex::web::{middleware, App, HttpServer, self};
-use rusqlite::Connection;
-use std::{
-    env, sync::{Arc, Mutex}
-};
+use api::article::view::view;
+use salvo::prelude::*;
+use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use std::{env, sync::{Arc, Mutex}};
+use dotenv::dotenv;
 
-mod article;
-mod errors;
+mod api;
 mod models;
 
-#[derive(Debug)]
+type State = Arc<Mutex<AppState>>;
 pub struct AppState {
-    pub db_pool: Connection,
+    pub db_pool: SqlitePool,
 }
 
-#[ntex::main]
-async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
-    env::set_var("RUST_LOG", "ntex=info");
-    env_logger::init();
-    let db_url = env::var("DATABASE_URL").expect("Please set `DATABASE_URL`");
-    println!("db: {db_url}");
-    let conn = Connection::open(db_url).expect("open sqlite err");
-    let app_state = Arc::new(Mutex::new(AppState {db_pool: conn}));
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt().init();
+    dotenv().ok();
+    let db_url = env::var("DATABASE_URL").unwrap();
+    let db_pool: State = Arc::new(Mutex::new(AppState {
+        db_pool: SqlitePoolOptions::new()
+            .max_connections(16)
+            .connect(&db_url)
+            .await.unwrap()
+    }));
 
-    HttpServer::new(move || {
-        App::new()
-            .state(Arc::clone(&app_state))
-            .wrap(middleware::Logger::default())
-            .configure(route)
-    }).bind("127.0.0.1:8000")?.workers(48).run().await?;
-    Ok(())
-}
+    let acceptor = TcpListener::new("127.0.0.1:5800").bind().await;
+    let router = Router::new().hoop(affix::inject(db_pool))
+        .push(Router::with_path("api").get(view))
+        .push(Router::with_path("<**path>").get(
+            StaticDir::new(["../client",])
+            .defaults("index.html")
+            .auto_list(true)
+        ));
 
-fn route(cfg:&mut web::ServiceConfig) {
-    cfg.service(web::scope("/article")
-        .route("", web::get().to(view::article))
-        .route("/new", web::post().to(new::article))
-        .route("/delete/{id}", web::put().to(delete::article))
-        .route("/edit/{id}", web::put().to(edit::article))
-        .route("/get/{id}", web::get().to(get::article))
-    );
+    Server::new(acceptor).serve(router).await;
 }
